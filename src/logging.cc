@@ -534,7 +534,7 @@ class LogDestination {
   LogFileObject fileobject_;
   base::Logger* logger_;      // Either &fileobject_, or wrapper around it
 
-  static LogDestination* log_destinations_[NUM_SEVERITIES];
+  static LogDestination* log_destinations_;
   static LogSeverity email_logging_severity_;
   static string addresses_;
   static string hostname_;
@@ -582,13 +582,11 @@ LogDestination::LogDestination(LogSeverity severity,
 inline void LogDestination::FlushLogFilesUnsafe(int min_severity) {
   // assume we have the log_mutex or we simply don't care
   // about it
-  for (int i = min_severity; i < NUM_SEVERITIES; i++) {
-    LogDestination* log = log_destinations_[i];
+  LogDestination* log = log_destinations_;
     if (log != NULL) {
       // Flush the base fileobject_ logger directly instead of going
       // through any wrappers to reduce chance of deadlock.
       log->fileobject_.FlushUnlocked();
-    }
   }
 }
 
@@ -779,8 +777,7 @@ inline void LogDestination::LogToAllLogfiles(LogSeverity severity,
   if ( FLAGS_logtostderr ) {           // global flag: never log to file
     ColoredWriteToStderr(severity, message, len);
   } else {
-    for (int i = severity; i >= 0; --i)
-      LogDestination::MaybeLogToLogfile(i, timestamp, message, len);
+    LogDestination::MaybeLogToLogfile(0, timestamp, message, len);
   }
 }
 
@@ -816,21 +813,19 @@ inline void LogDestination::WaitForSinks(LogMessage::LogMessageData* data) {
   }
 }
 
-LogDestination* LogDestination::log_destinations_[NUM_SEVERITIES];
+LogDestination* LogDestination::log_destinations_;
 
 inline LogDestination* LogDestination::log_destination(LogSeverity severity) {
   assert(severity >=0 && severity < NUM_SEVERITIES);
-  if (!log_destinations_[severity]) {
-    log_destinations_[severity] = new LogDestination(severity, NULL);
+  if (!log_destinations_) {
+    log_destinations_ = new LogDestination(severity, NULL);
   }
-  return log_destinations_[severity];
+  return log_destinations_;
 }
 
 void LogDestination::DeleteLogDestinations() {
-  for (int severity = 0; severity < NUM_SEVERITIES; ++severity) {
-    delete log_destinations_[severity];
-    log_destinations_[severity] = NULL;
-  }
+  delete log_destinations_;
+  log_destinations_ = NULL;
   MutexLock l(&sink_mutex_);
   delete sinks_;
   sinks_ = NULL;
@@ -993,7 +988,7 @@ void LogFileObject::FlushUnlocked(){
 
 bool LogFileObject::CreateLogfile(const string& time_pid_string) {
   string string_filename = base_filename_+filename_extension_+
-                           time_pid_string;
+                           time_pid_string + ".log";
   const char* filename = string_filename.c_str();
   int fd = open(filename, O_WRONLY | O_CREAT | O_EXCL, FLAGS_logfile_mode);
   if (fd == -1) return false;
@@ -1018,7 +1013,7 @@ bool LogFileObject::CreateLogfile(const string& time_pid_string) {
     // take directory from filename
     const char* slash = strrchr(filename, PATH_SEPARATOR);
     const string linkname =
-      symlink_basename_ + '.' + LogSeverityNames[severity_];
+      symlink_basename_ + ".log";
     string linkpath;
     if ( slash ) linkpath = string(filename, slash-filename+1);  // get dirname
     linkpath += linkname;
@@ -1152,21 +1147,20 @@ void LogFileObject::Write(bool force_flush,
       }
     }
 
-    // Write a header message into the log file
+    //Write a header message into the log file
     ostringstream file_header_stream;
     file_header_stream.fill('0');
     file_header_stream << "Log file created at: "
-                       << 1900+tm_time.tm_year << '/'
-                       << setw(2) << 1+tm_time.tm_mon << '/'
-                       << setw(2) << tm_time.tm_mday
-                       << ' '
-                       << setw(2) << tm_time.tm_hour << ':'
-                       << setw(2) << tm_time.tm_min << ':'
-                       << setw(2) << tm_time.tm_sec << '\n'
-                       << "Running on machine: "
-                       << LogDestination::hostname() << '\n'
-                       << "Log line format: [IWEF]mmdd hh:mm:ss.uuuuuu "
-                       << "threadid file:line] msg" << '\n';
+                      << 1900+tm_time.tm_year << '/'
+                      << setw(2) << 1+tm_time.tm_mon << '/'
+                      << setw(2) << tm_time.tm_mday
+                      << ' '
+                      << setw(2) << tm_time.tm_hour << ':'
+                      << setw(2) << tm_time.tm_min << ':'
+                      << setw(2) << tm_time.tm_sec << '\n'
+                      << "Running on machine: "
+                      << LogDestination::hostname() << '\n'
+                      << "Log line format: [pid:tid:mmdd/hh:mm:ss.uuuuuu:severity:file(line)] msg" << '\n';
     const string& file_header_string = file_header_stream.str();
 
     const int header_len = file_header_string.size();
@@ -1381,19 +1375,32 @@ void LogMessage::Init(const char* file,
   //    (log level, GMT month, date, time, thread_id, file basename, line)
   // We exclude the thread_id for the default thread.
   if (FLAGS_log_prefix && (line != kNoLogPrefix)) {
-    stream() << LogSeverityNames[severity][0]
-             << setw(2) << 1+data_->tm_time_.tm_mon
-             << setw(2) << data_->tm_time_.tm_mday
-             << ' '
-             << setw(2) << data_->tm_time_.tm_hour  << ':'
-             << setw(2) << data_->tm_time_.tm_min   << ':'
-             << setw(2) << data_->tm_time_.tm_sec   << "."
-             << setw(6) << data_->usecs_
-             << ' '
-             << setfill(' ') << setw(5)
-             << static_cast<unsigned int>(GetTID()) << setfill('0')
-             << ' '
-             << data_->basename_ << ':' << data_->line_ << "] ";
+    //stream() << LogSeverityNames[severity][0]
+    //         << setw(2) << 1+data_->tm_time_.tm_mon
+    //         << setw(2) << data_->tm_time_.tm_mday
+    //         << ' '
+    //         << setw(2) << data_->tm_time_.tm_hour  << ':'
+    //         << setw(2) << data_->tm_time_.tm_min   << ':'
+    //         << setw(2) << data_->tm_time_.tm_sec   << "."
+    //         << setw(6) << data_->usecs_
+    //         << ' '
+    //         << setfill(' ') << setw(5)
+    //         << static_cast<unsigned int>(GetTID()) << setfill('0')
+    //         << ' '
+    //         << data_->basename_ << ':' << data_->line_ << "] ";
+
+    stream() << '[' << getpid() << ":" << static_cast<unsigned int>(GetTID()) << ":"
+             << std::setfill('0')
+             << std::setw(2) << 1 + data_->tm_time_.tm_mon
+             << std::setw(2) << data_->tm_time_.tm_mday
+             << '/'
+             << std::setw(2) << data_->tm_time_.tm_hour
+             << std::setw(2) << data_->tm_time_.tm_min
+             << std::setw(2) << data_->tm_time_.tm_sec
+             << '.'
+             << std::setw(6) << data_->usecs_
+             << ':'
+             << LogSeverityNames[severity] << ":" << data_->basename_ << "(" << data_->line_ << ")] ";
   }
   data_->num_prefix_chars_ = data_->stream_.pcount();
 
@@ -1576,12 +1583,10 @@ void LogMessage::SendToLog() EXCLUSIVE_LOCKS_REQUIRED(log_mutex) {
       fatal_time = data_->timestamp_;
     }
 
-    if (!FLAGS_logtostderr) {
-      for (int i = 0; i < NUM_SEVERITIES; ++i) {
-        if ( LogDestination::log_destinations_[i] )
-          LogDestination::log_destinations_[i]->logger_->Write(true, 0, "", 0);
-      }
-    }
+    // if (!FLAGS_logtostderr) {
+    //   if ( LogDestination::log_destinations_)
+    //       LogDestination::log_destinations_->logger_->Write(true, 0, "", 0);
+    // }
 
     // release the lock that our caller (directly or indirectly)
     // LogMessage::~LogMessage() grabbed so that signal handlers
@@ -1782,18 +1787,30 @@ string LogSink::ToString(LogSeverity severity, const char* file, int line,
   ostringstream stream(string(message, message_len));
   stream.fill('0');
 
-  stream << LogSeverityNames[severity][0]
-         << setw(2) << 1+tm_time->tm_mon
-         << setw(2) << tm_time->tm_mday
-         << ' '
-         << setw(2) << tm_time->tm_hour << ':'
-         << setw(2) << tm_time->tm_min << ':'
-         << setw(2) << tm_time->tm_sec << '.'
-         << setw(6) << usecs
-         << ' '
-         << setfill(' ') << setw(5) << GetTID() << setfill('0')
-         << ' '
-         << file << ':' << line << "] ";
+  //stream << LogSeverityNames[severity][0]
+  //       << setw(2) << 1+tm_time->tm_mon
+  //       << setw(2) << tm_time->tm_mday
+  //       << ' '
+  //       << setw(2) << tm_time->tm_hour << ':'
+  //       << setw(2) << tm_time->tm_min << ':'
+  //       << setw(2) << tm_time->tm_sec << '.'
+  //       << setw(6) << usecs
+  //       << ' '
+  //       << setfill(' ') << setw(5) << GetTID() << setfill('0')
+  //       << ' '
+  //       << file << ':' << line << "] ";
+  stream << '[' << getpid() << ":" << static_cast<unsigned int>(GetTID()) << ":"
+      << std::setfill('0')
+      << std::setw(2) << 1 + tm_time->tm_mon
+      << std::setw(2) << tm_time->tm_mday
+      << '/'
+      << std::setw(2) << tm_time->tm_hour << ':'
+      << std::setw(2) << tm_time->tm_min << ':'
+      << std::setw(2) << tm_time->tm_sec << '.'
+      << '.'
+      << std::setw(6) << usecs
+      << ':'
+      << LogSeverityNames[severity] << ":" << file << "(" << line << ")] ";
 
   stream << string(message, message_len);
   return stream.str();
